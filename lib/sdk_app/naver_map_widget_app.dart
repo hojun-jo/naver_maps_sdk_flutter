@@ -15,16 +15,11 @@ class NaverMapWidget extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     naverMapManager.onTapLink = (url) {
-      final controller = WebViewController()
-        ..setJavaScriptMode(JavaScriptMode.unrestricted)
-        ..loadRequest(Uri.parse(url));
       Navigator.push(
         context,
         MaterialPageRoute(
           builder: (context) => SafeArea(
-            child: Scaffold(
-              body: WebViewWidget(controller: controller),
-            ),
+            child: Scaffold(body: _InAppWebViewPage(url: url)),
           ),
         ),
       );
@@ -47,5 +42,49 @@ class NaverMapWidget extends StatelessWidget {
         return WebViewWidget(controller: naverMapManager._controller);
       },
     );
+  }
+}
+
+class _InAppWebViewPage extends StatefulWidget {
+  final String url;
+  
+  const _InAppWebViewPage({required this.url});
+
+  @override
+  State<_InAppWebViewPage> createState() => _InAppWebViewPageState();
+}
+
+class _InAppWebViewPageState extends State<_InAppWebViewPage> {
+  late final WebViewController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setBackgroundColor(const Color(0x00000000))
+      ..setNavigationDelegate(
+        NavigationDelegate(
+          onWebResourceError: (error) {
+            debugPrint('InAppWebView error: ${error.description}');
+          },
+        ),
+      )
+      ..loadRequest(Uri.parse(widget.url));
+  }
+
+  @override
+  void dispose() {
+    try {
+      _controller.loadHtmlString('<!doctype html><html><body></body></html>');
+    } catch (e) {
+      debugPrint('InAppWebView dispose error: $e');
+    }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return WebViewWidget(controller: _controller);
   }
 }

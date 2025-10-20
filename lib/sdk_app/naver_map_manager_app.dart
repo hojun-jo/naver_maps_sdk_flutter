@@ -7,6 +7,9 @@ class NaverMapManager implements NaverMapManagerInterface {
   late final String _mapDivId;
   late final String _mapId;
 
+  bool _isDisposed = false;
+  bool _isMapInitialized = false;
+
   StreamController<MapLoadStatus>? _mapLoadStatusController;
   StreamController<MarkerEvent>? _markerEventController;
   StreamController<MapEvent>? _mapEventController;
@@ -41,6 +44,8 @@ class NaverMapManager implements NaverMapManagerInterface {
   }
 
   void _initializeWebViewController() async {
+    if (_isDisposed) return;
+
     _controller
       ..setOnConsoleMessage((message) {
         debugPrint('WebView Console:: ${message.message}');
@@ -156,11 +161,37 @@ class NaverMapManager implements NaverMapManagerInterface {
         .replaceFirst(mapDivPlaceHolder, mapDivId);
   }
 
+  Future<void> _runJsSafe(
+    String script, {
+    bool allowBeforeReady = false,
+  }) async {
+    if (_isDisposed) return;
+    if (!allowBeforeReady && !_pageFinishedCompleter.isCompleted) return;
+    try {
+      await _controller.runJavaScript(script);
+    } catch (e) {
+      debugPrint('WebView JS error: $e');
+    }
+  }
+
+  Future<T?> _runJsReturningSafe<T>(String script) async {
+    if (_isDisposed || !_pageFinishedCompleter.isCompleted) return null;
+    try {
+      final result = await _controller.runJavaScriptReturningResult(script);
+      return result as T;
+    } catch (e) {
+      debugPrint('WebView JS error: $e');
+      return null;
+    }
+  }
+
   Future<void> _initializeNaverMap(MapOptions? mapOptions) async {
+    if (_isDisposed || _isMapInitialized) return;
     debugPrint('mapOptions:: ${mapOptions?.toJson() ?? '{}'}');
-    await _controller.runJavaScript(
+    await _runJsSafe(
       'initMap(${jsonEncode(_mapDivId)}, ${mapOptions?.toJson() ?? '{}'}, ${jsonEncode(_mapId)})',
     );
+    _isMapInitialized = true;
   }
 
   @override
@@ -221,23 +252,37 @@ class NaverMapManager implements NaverMapManagerInterface {
 
   @override
   void dispose() async {
-    _mapLoadStatusController?.close();
-    _markerEventController?.close();
-    _mapEventController?.close();
-    await disposeMap();
+    if (_isDisposed) return;
+    try {
+      await disposeMap();
+      await _controller.loadHtmlString(
+        '<!doctype html><html><body></body></html>',
+      );
+    } catch (e) {
+      debugPrint('WebView dispose error: $e');
+    }
+
+    await _mapLoadStatusController?.close();
+    await _markerEventController?.close();
+    await _mapEventController?.close();
+
+    _isMapInitialized = false;
+    _isDisposed = true;
   }
 
   @override
   Future<Coord> getCenter({required bool shouldReturnLatLng}) async {
-    String jsonStringResult =
-        await _controller.runJavaScriptReturningResult(
-              'window.getCenter(${jsonEncode(_mapId)})',
-            )
-            as String;
-    if (Platform.isIOS) {
-      jsonStringResult = NSDictionaryUtil.convert(jsonStringResult);
+    final String? jsonStringResult = await _runJsReturningSafe<String>(
+      'window.getCenter(${jsonEncode(_mapId)})',
+    );
+    if (jsonStringResult == null) {
+      throw StateError('WebView is not ready or has been disposed');
     }
-    final Map<String, dynamic> json = jsonDecode(jsonStringResult);
+    String processed = jsonStringResult;
+    if (Platform.isIOS) {
+      processed = NSDictionaryUtil.convert(jsonStringResult);
+    }
+    final Map<String, dynamic> json = jsonDecode(processed);
     if (shouldReturnLatLng) {
       final Coord coord = NLatLng(json['_lat'], json['_lng']);
       return coord;
@@ -249,25 +294,28 @@ class NaverMapManager implements NaverMapManagerInterface {
 
   @override
   Future<int> getZoom() async {
-    final num jsonStringResult =
-        await _controller.runJavaScriptReturningResult(
-              'getZoom(${jsonEncode(_mapId)})',
-            )
-            as num;
-    return jsonStringResult.toInt();
+    final num? result = await _runJsReturningSafe<num>(
+      'getZoom(${jsonEncode(_mapId)})',
+    );
+    if (result == null) {
+      throw StateError('WebView is not ready or has been disposed');
+    }
+    return result.toInt();
   }
 
   @override
   Future<Bounds> getBounds({required bool shouldReturnLatLng}) async {
-    String jsonStringResult =
-        await _controller.runJavaScriptReturningResult(
-              'getBounds(${jsonEncode(_mapId)})',
-            )
-            as String;
-    if (Platform.isIOS) {
-      jsonStringResult = NSDictionaryUtil.convert(jsonStringResult);
+    final String? jsonStringResult = await _runJsReturningSafe<String>(
+      'getBounds(${jsonEncode(_mapId)})',
+    );
+    if (jsonStringResult == null) {
+      throw StateError('WebView is not ready or has been disposed');
     }
-    final Map<String, dynamic> json = jsonDecode(jsonStringResult);
+    String processed = jsonStringResult;
+    if (Platform.isIOS) {
+      processed = NSDictionaryUtil.convert(jsonStringResult);
+    }
+    final Map<String, dynamic> json = jsonDecode(processed);
     final Bounds bounds;
     if (shouldReturnLatLng) {
       bounds = NLatLngBounds(
@@ -288,12 +336,10 @@ class NaverMapManager implements NaverMapManagerInterface {
     required NLatLngBounds bounds,
     required Coord coord,
   }) async {
-    final bool jsonStringResult =
-        await _controller.runJavaScriptReturningResult(
-              'window.hasLatLng(${bounds.toJson()}, ${coord.toJson()})',
-            )
-            as bool;
-    return jsonStringResult;
+    final bool? result = await _runJsReturningSafe<bool>(
+      'window.hasLatLng(${bounds.toJson()}, ${coord.toJson()})',
+    );
+    return result ?? false;
   }
 
   @override
@@ -301,24 +347,22 @@ class NaverMapManager implements NaverMapManagerInterface {
     required NPointBounds bounds,
     required Coord coord,
   }) async {
-    final bool jsonStringResult =
-        await _controller.runJavaScriptReturningResult(
-              'window.hasPoint(${bounds.toJson()}, ${coord.toJson()})',
-            )
-            as bool;
-    return jsonStringResult;
+    final bool? result = await _runJsReturningSafe<bool>(
+      'window.hasPoint(${bounds.toJson()}, ${coord.toJson()})',
+    );
+    return result ?? false;
   }
 
   @override
   Future<void> setCenter({required Coord center}) async {
-    await _controller.runJavaScript(
+    await _runJsSafe(
       'window.setCenter(${jsonEncode(_mapId)}, ${center.toJson()})',
     );
   }
 
   @override
   Future<void> setZoom({required int zoom}) async {
-    await _controller.runJavaScript('setZoom(${jsonEncode(_mapId)}, $zoom)');
+    await _runJsSafe('setZoom(${jsonEncode(_mapId)}, $zoom)');
   }
 
   @override
@@ -326,7 +370,7 @@ class NaverMapManager implements NaverMapManagerInterface {
     required String markerId,
     required MarkerOptions markerOptions,
   }) async {
-    await _controller.runJavaScript(
+    await _runJsSafe(
       'window.addMarker(${jsonEncode(_mapId)}, ${jsonEncode(markerId)}, ${markerOptions.toJson()})',
     );
   }
@@ -336,153 +380,153 @@ class NaverMapManager implements NaverMapManagerInterface {
     required String markerId,
     required MarkerOptions markerOptions,
   }) async {
-    await _controller.runJavaScript(
+    await _runJsSafe(
       'window.updateMarker(${jsonEncode(_mapId)}, ${jsonEncode(markerId)}, ${markerOptions.toJson()})',
     );
   }
 
   @override
   Future<void> removeMarker({required String markerId}) async {
-    await _controller.runJavaScript(
+    await _runJsSafe(
       'window.removeMarker(${jsonEncode(_mapId)}, ${jsonEncode(markerId)})',
     );
   }
 
   @override
   Future<void> removeMarkerAll() async {
-    await _controller.runJavaScript(
-      'window.removeMarkerAll(${jsonEncode(_mapId)})',
-    );
+    await _runJsSafe('window.removeMarkerAll(${jsonEncode(_mapId)})');
   }
 
   @override
   Future<List<int>> getMarkerIds() async {
-    String jsonStringResult =
-        await _controller.runJavaScriptReturningResult(
-              'window.getMarkerIds(${jsonEncode(_mapId)})',
-            )
-            as String;
-    if (Platform.isIOS) {
-      jsonStringResult = NSDictionaryUtil.convert(jsonStringResult);
+    final String? jsonStringResult = await _runJsReturningSafe<String>(
+      'window.getMarkerIds(${jsonEncode(_mapId)})',
+    );
+    if (jsonStringResult == null) {
+      return <int>[];
     }
-    final List<dynamic> markerIds = jsonDecode(jsonStringResult);
+    String processed = jsonStringResult;
+    if (Platform.isIOS) {
+      processed = NSDictionaryUtil.convert(jsonStringResult);
+    }
+    final List<dynamic> markerIds = jsonDecode(processed);
     return markerIds.cast<int>();
   }
 
   @override
   Future<void> addMarkerClickEvent({required String markerId}) async {
-    await _controller.runJavaScript(
+    await _runJsSafe(
       'window.addMarkerClickEvent(${jsonEncode(_mapId)}, ${jsonEncode(markerId)})',
     );
   }
 
   @override
   Future<void> removeMarkerClickEvent({required String markerId}) async {
-    await _controller.runJavaScript(
+    await _runJsSafe(
       'window.removeMarkerClickEvent(${jsonEncode(_mapId)}, ${jsonEncode(markerId)})',
     );
   }
 
   @override
   Future<void> addMapClickEventListener() async {
-    await _controller.runJavaScript(
-      'window.addMapClickEventListener(${jsonEncode(_mapId)})',
-    );
+    await _runJsSafe('window.addMapClickEventListener(${jsonEncode(_mapId)})');
   }
 
   @override
   Future<void> removeMapClickEventListener() async {
-    await _controller.runJavaScript(
+    await _runJsSafe(
       'window.removeMapClickEventListener(${jsonEncode(_mapId)})',
     );
   }
 
   @override
   Future<void> addMapLongTapEventListener() async {
-    await _controller.runJavaScript(
+    await _runJsSafe(
       'window.addMapLongTapEventListener(${jsonEncode(_mapId)})',
     );
   }
 
   @override
   Future<void> removeMapLongTapEventListener() async {
-    await _controller.runJavaScript(
+    await _runJsSafe(
       'window.removeMapLongTapEventListener(${jsonEncode(_mapId)})',
     );
   }
 
   @override
   Future<void> addMapIdleEventListener() async {
-    await _controller.runJavaScript(
-      'window.addMapIdleEventListener(${jsonEncode(_mapId)})',
-    );
+    await _runJsSafe('window.addMapIdleEventListener(${jsonEncode(_mapId)})');
   }
 
   @override
   Future<void> removeMapIdleEventListener() async {
-    await _controller.runJavaScript(
+    await _runJsSafe(
       'window.removeMapIdleEventListener(${jsonEncode(_mapId)})',
     );
   }
 
   @override
   Future<void> addMapZoomChangedEventListener() async {
-    await _controller.runJavaScript(
+    await _runJsSafe(
       'window.addMapZoomChangedEventListener(${jsonEncode(_mapId)})',
     );
   }
 
   @override
   Future<void> removeMapZoomChangedEventListener() async {
-    await _controller.runJavaScript(
+    await _runJsSafe(
       'window.removeMapZoomChangedEventListener(${jsonEncode(_mapId)})',
     );
   }
 
   @override
   Future<void> addMapZoomEndEventListener() async {
-    await _controller.runJavaScript(
+    await _runJsSafe(
       'window.addMapZoomEndEventListener(${jsonEncode(_mapId)})',
     );
   }
 
   @override
   Future<void> removeMapZoomEndEventListener() async {
-    await _controller.runJavaScript(
+    await _runJsSafe(
       'window.removeMapZoomEndEventListener(${jsonEncode(_mapId)})',
     );
   }
 
   @override
   Future<void> addMapZoomStartEventListener() async {
-    await _controller.runJavaScript(
+    await _runJsSafe(
       'window.addMapZoomStartEventListener(${jsonEncode(_mapId)})',
     );
   }
 
   @override
   Future<void> removeMapZoomStartEventListener() async {
-    await _controller.runJavaScript(
+    await _runJsSafe(
       'window.removeMapZoomStartEventListener(${jsonEncode(_mapId)})',
     );
   }
 
   @override
   Future<void> addMapCenterChangedEventListener() async {
-    await _controller.runJavaScript(
+    await _runJsSafe(
       'window.addMapCenterChangedEventListener(${jsonEncode(_mapId)})',
     );
   }
 
   @override
   Future<void> removeMapCenterChangedEventListener() async {
-    await _controller.runJavaScript(
+    await _runJsSafe(
       'window.removeMapCenterChangedEventListener(${jsonEncode(_mapId)})',
     );
   }
 
   @override
   Future<void> disposeMap() async {
-    await _controller.runJavaScript('window.disposeMap(${jsonEncode(_mapId)})');
+    try {
+      await _controller.runJavaScript(
+        'window.disposeMap(${jsonEncode(_mapId)})',
+      );
+    } catch (_) {}
   }
 }
